@@ -1,0 +1,175 @@
+# For deploy to local machine use:
+# $ ansible-playbook ansible/deploy.yml -i ansible/hosts.ini -l local -kK
+---
+- name: symfony2 application deploy
+  hosts: all
+  remote_user: vagrant
+  vars:
+    symfony2_repo: git@bitbucket.org:vendor/project.git
+    symfony2_root_path: "{{ host_symfony2_root_path|default('/var/www/example.local') }}"
+    symfony2_console_path: "{{ symfony2_root_path }}/app/console"
+    symfony2_cache_path: "{{ symfony2_root_path }}/app/cache"
+    symfony2_logs_path: "{{ symfony2_root_path }}/app/logs"
+    symfony2_web_path: "{{ symfony2_root_path }}/web"
+    symfony2_uploads_path: "{{ symfony2_web_path }}/uploads"
+
+  vars_prompt:
+    - name: symfony2_env
+      prompt: Enter Symfony2 application environment (dev|prod)
+      default: dev
+      private: no
+
+    - name: symfony2_repo_checkout
+      prompt: Whether to check out Symfony2 repository?
+      default: yes
+      private: no
+
+    # What version of the repository to check out.
+    # This can be the full 40-character SHA-1 hash,
+    # the literal string HEAD, a branch name, or a tag name.
+    - name: symfony2_release_version
+      prompt: Enter Symfony2 application release version
+      default: HEAD
+      private: no
+      when: symfony2_repo_checkout
+
+  pre_tasks:
+    - name: export symfony environment variable
+      debug: msg="Set the SYMFONY_ENV to {{ symfony2_env | upper }}"
+      environment:
+        SYMFONY_ENV: "{{ symfony2_env }}"
+
+    - name: check whether repository exists
+      stat: path={{ symfony2_root_path }}/.git
+      register: repo
+
+    - name: clone repository
+      git: repo="{{ symfony2_repo }}"
+           dest="{{ symfony2_root_path }}"
+           version="{{ symfony2_release_version }}"
+           accept_hostkey=yes
+      when: not (repo.stat.exists and repo.stat.isdir)
+
+    # Maintenance mode
+    - name: turn on maintenance mode
+      command: cp "{{ symfony2_web_path }}/_maintenance.html" "{{ symfony2_web_path }}/maintenance.html"
+      args:
+        creates: "{{ symfony2_web_path }}/maintenance.html"
+
+    # VCS
+    - name: checkout repository
+      git: repo="{{ symfony2_repo }}"
+           dest="{{ symfony2_root_path }}"
+           version="{{ symfony2_release_version }}"
+      when: symfony2_repo_checkout
+
+    # Required for further deploy
+    - name: ensure cache permissions are set to 0777
+      sudo: yes
+      command: chmod -R 0777 "{{ symfony2_cache_path }}"
+      args:
+        removes: "{{ symfony2_cache_path }}"
+
+    - name: ensure app/console permissions are set to 0755
+      sudo: yes
+      file: path="{{ symfony2_console_path }}" mode=0755
+
+  tasks:
+    # Vendor dependencies
+    - name: install composer vendor dependencies
+      composer: working_dir="{{ symfony2_root_path }}" no_dev=no
+
+    - name: remove bower vendor dependencies # workaround to fix https://github.com/ansible/ansible-modules-extras/issues/495
+      command: find "{{ symfony2_web_path }}/bower_components" -type d -mindepth 1 -maxdepth 1 -exec rm -rf {} \;
+      args:
+        removes: "{{ symfony2_web_path }}/bower_components"
+
+    - name: install bower vendor dependencies
+      bower: path="{{ symfony2_web_path }}" state=latest
+
+    # Doctrine
+    - name: validate doctrine schema
+      sudo: yes
+      command: php "{{ symfony2_console_path }}" doctrine:schema:validate
+      register: doctrine_status
+      ignore_errors: yes
+
+    - name: validate mapping files
+      set_fact: hold_maintenance_mode_on=true
+      when: not doctrine_status.stdout | search("\[Mapping\]\s+OK")
+
+    - name: validate database schema
+      set_fact: hold_maintenance_mode_on=true
+      when: not doctrine_status.stdout | search("\[Database\]\s+OK")
+
+      # make database migration...
+
+      # load doctrine fixtures...
+
+    # Cache
+    - name: clear prod cache
+      sudo: yes
+      command: php "{{ symfony2_console_path }}" cache:clear --env=prod --no-warmup
+
+    - name: clear dev cache
+      sudo: yes
+      command: php "{{ symfony2_console_path }}" cache:clear --env=dev --no-warmup
+      when: symfony2_env == "dev"
+
+    - name: warm up prod cache
+      sudo: yes
+      command: php "{{ symfony2_console_path }}" cache:warmup --env=prod
+
+    - name: warm up dev cache
+      sudo: yes
+      command: php "{{ symfony2_console_path }}" cache:warmup --env=dev
+      when: symfony2_env == "dev"
+
+    # Assets
+    - name: dump prod assets
+      sudo: yes
+      command: php "{{ symfony2_console_path }}" assetic:dump --env=prod
+
+    - name: dump dev assets
+      sudo: yes
+      command: php "{{ symfony2_console_path }}" assetic:dump --env=dev
+      when: symfony2_env == "dev"
+
+    # Permissions
+    - name: ensure directories permissions are set to 0755
+      sudo: yes
+      command: find "{{ symfony2_root_path }}" -type d -exec chmod 0755 {} \;
+
+    - name: ensure files permissions are set to 0644
+      sudo: yes
+      command: find "{{ symfony2_root_path }}" -type f -exec chmod 0644 {} \;
+
+    - name: ensure app/console permissions are set to 0755
+      sudo: yes
+      file: path="{{ symfony2_console_path }}" mode=0755
+
+    - name: ensure cache dir permissions are set to 0777
+      sudo: yes
+      file: path="{{ symfony2_cache_path }}" mode=0777 recurse=yes
+
+    - name: ensure logs dir permissions are set to 0777
+      sudo: yes
+      file: path="{{ symfony2_logs_path }}" mode=0777 recurse=yes
+
+    - name: ensure uploads dir permissions are set to 0777
+      sudo: yes
+      file: path="{{ symfony2_uploads_path }}" mode=0777 recurse=yes
+
+  post_tasks:
+    # Maintenance mode
+    - name: turn off maintenance mode
+      file: path="{{ symfony2_web_path }}/maintenance.html" state=absent
+      when: not hold_maintenance_mode_on | default(false)
+
+    - name: ensure maintenance mode is turned off
+      debug: msg="The maintenance mode is still turned ON
+                  because mapping files or database schema invalid.
+                  You need to fix this errors yourself.
+                  Then re-run deploy playbook
+                  or turn OFF maintenance mode manually."
+      when: hold_maintenance_mode_on | default(false)
