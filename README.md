@@ -100,3 +100,5 @@ or with `Apache` config:
     CustomLog /var/log/apache2/example.local.access.log combined
 </VirtualHost>
 ```
+
+> **NOTE:** The maintenance mode work only for `prod` environment by default. If you want to enable it for `dev` - resolve it manually in config file base on work example for `prod`.
