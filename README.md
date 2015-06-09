@@ -59,3 +59,44 @@ server {
     access_log /var/log/nginx/example.local.access.log;
 }
 ```
+
+or with `Apache` config:
+``` ApacheConf
+<VirtualHost *:80>
+    ServerName example.local
+    ServerAlias www.example.local
+    ServerAdmin admin@example.local
+    
+    DirectoryIndex maintenance.html app.php
+    DocumentRoot /var/www/example.local/web
+    <Directory /var/www/example.local/web>
+        AllowOverride None
+        Order Allow,Deny
+        Allow from All
+
+        <IfModule mod_rewrite.c>
+            Options -MultiViews
+            RewriteEngine On
+
+            # maintenance mode support
+            RewriteCond %{DOCUMENT_ROOT}/maintenance.html -f
+            RewriteCond %{REQUEST_FILENAME} !maintenance.html
+            RewriteCond %{REQUEST_FILENAME} app.php
+            RewriteRule ^.*$ maintenance.html [R=503,L]
+
+            RewriteCond %{REQUEST_FILENAME} !-f
+            RewriteRule ^(.*)$ app.php [QSA,L]
+        </IfModule>
+    </Directory>
+
+    # uncomment the following lines if you install assets as symlinks
+    # or run into problems when compiling LESS/Sass/CoffeScript assets
+    # <Directory /var/www/example.local>
+    #     Options FollowSymlinks
+    # </Directory>
+
+    ErrorDocument 503 /maintenance.html
+    ErrorLog /var/log/apache2/example.local.error.log
+    CustomLog /var/log/apache2/example.local.access.log combined
+</VirtualHost>
+```
